@@ -5,3 +5,4 @@ numpy
 pillow
 opencv-python-headless
 tensorflow==2.20.0
+
