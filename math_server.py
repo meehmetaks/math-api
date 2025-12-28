@@ -20,25 +20,21 @@ LABELS = {0:'0', 1:'1', 2:'2', 3:'3', 4:'4', 5:'5', 6:'6', 7:'7', 8:'8', 9:'9',
           10:'+', 11:'-', 12:'x', 13:'/'}
 
 model = None
+MODEL_PATH = "best_math_cnn_model.keras"
 
-def find_and_load_model():
-    print("--- MODEL ARANIYOR ---")
-    cwd = os.getcwd()
-    print(f"Mevcut klasör: {cwd}")
-    for root, dirs, files in os.walk(cwd):
-        for f in files:
-            if f.endswith(".keras") or f.endswith(".h5"):
-                path = os.path.join(root, f)
-                try:
-                    loaded = tf.keras.models.load_model(path)
-                    print(f"✅ Model yüklendi: {path}")
-                    return loaded
-                except Exception as e:
-                    print(f"❌ Model bulundu ama yüklenemedi: {e}")
-    print("❌ Model bulunamadı!")
-    return None
+def load_model():
+    global model
+    if os.path.exists(MODEL_PATH):
+        try:
+            model = tf.keras.models.load_model(MODEL_PATH)
+            print(f"✅ Model yüklendi: {MODEL_PATH}")
+        except Exception as e:
+            print(f"❌ Model yüklenemedi: {e}")
+            model = None
+    else:
+        print("❌ Model dosyası bulunamadı!")
 
-model = find_and_load_model()
+load_model()
 
 def preprocess_for_api(roi):
     h, w = roi.shape
@@ -81,13 +77,13 @@ def merge_and_group(boxes, y_tol=30):
 
 @app.get("/")
 def read_root():
-    return {"message": "Math API Calisiyor"}
+    return {"message": "Math API Çalışıyor"}
 
 @app.post("/solve")
 async def solve(file: UploadFile = File(...)):
     global model
     if model is None:
-        model = find_and_load_model()
+        load_model()
         if model is None:
             return {"result":"Err","expr":"MODEL_NOT_LOADED","anchorX":0.0,"debug_boxes":[]}
 
@@ -95,6 +91,7 @@ async def solve(file: UploadFile = File(...)):
         contents = await file.read()
         image = Image.open(BytesIO(contents)).convert('L')
         img_np = np.array(image)
+
         if np.mean(img_np) > 127:
             img_np = cv2.bitwise_not(img_np)
 
