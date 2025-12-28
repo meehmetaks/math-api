@@ -20,117 +20,93 @@ LABELS = {0:'0', 1:'1', 2:'2', 3:'3', 4:'4', 5:'5', 6:'6', 7:'7', 8:'8', 9:'9',
           10:'+', 11:'-', 12:'x', 13:'/'}
 
 model = None
-MODEL_PATH = "best_math_cnn_model.keras"
 
-def load_model():
-    global model
-    if os.path.exists(MODEL_PATH):
-        try:
-            model = tf.keras.models.load_model(MODEL_PATH)
-            print(f"✅ Model yüklendi: {MODEL_PATH}")
-        except Exception as e:
-            print(f"❌ Model yüklenemedi: {e}")
-            model = None
-    else:
-        print("❌ Model dosyası bulunamadı!")
+def find_and_load_model():
+    print("--- MODEL YÜKLENİYOR ---")
+    cwd = os.getcwd()
+    for root, dirs, files in os.walk(cwd):
+        for f in files:
+            if f.endswith(".keras") or f.endswith(".h5"):
+                path = os.path.join(root, f)
+                try:
+                    # Keras 3 uyumluluğu için safe_mode=False eklendi
+                    loaded = tf.keras.models.load_model(path, safe_mode=False)
+                    print(f"✅ Model başarıyla yüklendi: {path}")
+                    return loaded
+                except Exception as e:
+                    print(f"❌ Yükleme hatası: {e}")
+    return None
 
-load_model()
+model = find_and_load_model()
 
-def preprocess_for_api(roi):
-    h, w = roi.shape
-    diff = abs(h - w)
-    pad1, pad2 = diff // 2, diff - diff // 2
-    if h > w:
-        padded = cv2.copyMakeBorder(roi, 0, 0, pad1, pad2, cv2.BORDER_CONSTANT, value=0)
-    else:
-        padded = cv2.copyMakeBorder(roi, pad1, pad2, 0, 0, cv2.BORDER_CONSTANT, value=0)
-    resized = cv2.resize(padded, (20, 20), interpolation=cv2.INTER_AREA)
-    final_img = np.zeros((28, 28), dtype=np.uint8)
-    final_img[4:24, 4:24] = resized
-    final_img = final_img.astype('float32') / 255.0
-    final_img = np.expand_dims(final_img, axis=-1)
-    final_img = np.expand_dims(final_img, axis=0)
-    return final_img
+def preprocess_for_api(image_np):
+    img = cv2.resize(image_np, (28, 28))
+    img = img.astype('float32') / 255.0
+    img = np.expand_dims(img, axis=-1)
+    img = np.expand_dims(img, axis=0)
+    return img
 
-def merge_and_group(boxes, y_tol=30):
+def merge_and_group(boxes, dist=10):
     if not boxes: return []
     boxes = sorted(boxes, key=lambda b: b[0])
     merged = []
-    while boxes:
-        curr = list(boxes.pop(0))
-        changed = True
-        while changed:
-            changed = False
-            for i in range(len(boxes)):
-                x2, y2, w2, h2 = boxes[i]
-                overlap = min(curr[0]+curr[2], x2+w2) - max(curr[0], x2)
-                y_dist = abs(curr[1] - y2)
-                if overlap > min(curr[2], w2)*0.5 and y_dist < y_tol:
-                    nx, ny = min(curr[0], x2), min(curr[1], y2)
-                    nw, nh = max(curr[0]+curr[2], x2+w2)-nx, max(curr[1]+curr[3], y2+h2)-ny
-                    curr = [nx, ny, nw, nh]
-                    boxes.pop(i)
-                    changed = True
-                    break
-        merged.append(tuple(curr))
+    if len(boxes) > 0:
+        curr = list(boxes[0])
+        for i in range(1, len(boxes)):
+            nxt = boxes[i]
+            if nxt[0] < curr[0] + curr[2] + dist:
+                new_x = min(curr[0], nxt[0])
+                new_y = min(curr[1], nxt[1])
+                new_w = max(curr[0] + curr[2], nxt[0] + nxt[2]) - new_x
+                new_h = max(curr[1] + curr[3], nxt[1] + nxt[3]) - new_y
+                curr = [new_x, new_y, new_w, new_h]
+            else:
+                merged.append(curr)
+                curr = list(nxt)
+        merged.append(curr)
     return merged
-
-@app.get("/")
-def read_root():
-    return {"message": "Math API Çalışıyor"}
 
 @app.post("/solve")
 async def solve(file: UploadFile = File(...)):
-    global model
     if model is None:
-        load_model()
-        if model is None:
-            return {"result":"Err","expr":"MODEL_NOT_LOADED","anchorX":0.0,"debug_boxes":[]}
-
+        return {"error": "Model sunucuda yüklü değil."}
+    
     try:
         contents = await file.read()
         image = Image.open(BytesIO(contents)).convert('L')
-        img_np = np.array(image)
-
-        if np.mean(img_np) > 127:
-            img_np = cv2.bitwise_not(img_np)
-
-        _, thresh = cv2.threshold(img_np,127,255,cv2.THRESH_BINARY)
-        contours,_ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        boxes = [cv2.boundingRect(c) for c in contours if cv2.boundingRect(c)[2]>5]
+        image_np = np.array(image)
+        
+        # Görüntü işleme ve segmentasyon
+        _, thresh = cv2.threshold(image_np, 127, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        boxes = [cv2.boundingRect(c) for c in contours if cv2.boundingRect(c)[2] > 5]
         boxes = merge_and_group(boxes)
-        boxes = sorted(boxes,key=lambda b:b[0])
+        boxes = sorted(boxes, key=lambda b: b[0])
 
         expression = ""
-        debug_boxes = []
-        min_x, max_x = 10000, 0
-
-        for x,y,w,h in boxes:
-            min_x = min(min_x,x)
-            max_x = max(max_x,x+w)
-            roi = thresh[y:y+h,x:x+w]
+        for x, y, w, h in boxes:
+            roi = thresh[y:y+h, x:x+w]
             processed = preprocess_for_api(roi)
-            pred = model.predict(processed,verbose=0)
-            label = LABELS.get(np.argmax(pred),'?')
+            pred = model.predict(processed, verbose=0)
+            label = LABELS.get(np.argmax(pred), '?')
             expression += label
-            debug_boxes.append({"rect":[int(x),int(y),int(w),int(h)],"label":label})
 
+        # Hesaplama
+        calc_expr = expression.replace('x', '*')
+        result = "Hata"
         try:
-            calc_expr = expression.replace('x','*')
             if set(calc_expr).issubset(set("0123456789+-*/. ")):
-                py_result = eval(calc_expr)
-                if isinstance(py_result,float) and py_result.is_integer():
-                    result=int(py_result)
-                else:
-                    result=py_result
-            else:
-                result="?"
+                result = eval(calc_expr)
         except:
-            result="?"
+            result = "Hesaplanamadı"
 
-        anchor_x = (min_x+max_x)/2 if max_x>0 else 50.0
-        return {"expression":expression,"expr":expression,"result":str(result),"anchorX":anchor_x,"debug_boxes":debug_boxes}
-
+        return {
+            "expression": expression,
+            "result": str(result)
+        }
     except Exception as e:
-        print(f"Hata: {e}")
-        return {"result":"Err","expr":"Hata","anchorX":0.0,"debug_boxes":[]}
+        return {"error": str(e)}
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "model_loaded": model is not None}
