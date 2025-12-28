@@ -1,10 +1,10 @@
-# Temel imaj
-FROM python:3.9-bullseye
+# Temel Python imajı
+FROM python:3.10-slim
 
 # Çalışma klasörü
 WORKDIR /app
 
-# Sistem paketlerini yükle
+# Sistem paketlerini yükle (OpenCV ve TF için)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         libgl1-mesa-glx \
@@ -16,7 +16,8 @@ RUN apt-get update && \
 
 # Python bağımlılıkları
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Uygulama dosyalarını kopyala
 COPY . .
